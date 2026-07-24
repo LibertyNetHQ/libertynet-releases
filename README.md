@@ -1,24 +1,27 @@
-# LibertyNet Releases
+# LibertyNet — Releases
 
-Public download host for **LibertyNet node** binaries. Source code lives in the
-private `LibertyNetHQ/LibertyNet-hq` repository; only built artifacts are published here.
+Public distribution of the **LibertyNet node** binaries and installers.
+**Source code stays private** in `LibertyNetHQ/LibertyNet-hq`; only build outputs are published here.
 
-## Download
+## macOS
 
-Get the latest macOS installer from the [Releases page](../../releases/latest).
+The installer is a **universal** `.pkg` (Apple Silicon + Intel from one binary):
+`libertynet-init` + `portal-daemon` → `/usr/local/bin`, creates your DID (shows the
+12-word recovery phrase once), and starts the node as a per-user LaunchAgent.
 
-- **LibertyNet-Node-0.1.0.pkg** — universal macOS installer (Intel + Apple Silicon).
-  No Rust, no compiler, no Terminal required.
+### ⚠️ Opening an unsigned build (right-click → Open)
 
-### Install
+Releases here are **not yet Apple-signed/notarized**, so Gatekeeper will block a
+double-click. To install:
 
-1. Download the `.pkg` from Releases.
-2. The build is not yet Apple-notarized, so macOS Gatekeeper blocks a plain double-click.
-   Open it once with **right-click (or Control-click) → Open → Open**, then enter your
-   password. Every later launch of the installed node is automatic.
-3. The installer creates your DID (shows a 12-word recovery phrase **once** — write it
-   down offline) and loads a background agent that registers your node to the LibertyNet
-   registry and heartbeats on login.
+1. Download the `.pkg`.
+2. **Right-click** (or Control-click) the file → **Open** → confirm **Open** in the dialog.
+   (Do this instead of double-clicking; it tells Gatekeeper you trust this build.)
+3. Follow the installer. Write down your 12-word recovery phrase when shown.
 
-Verify a download with `shasum -a 256 LibertyNet-Node-0.1.0.pkg` against the checksum in
-the release notes.
+Apple signing + notarization is planned; until then the right-click-Open step is required.
+
+## Integrity
+
+Each release lists the **source commit SHA** it was built from and the binary's
+`sha256`. Verify the download's `shasum -a 256` matches before installing.
