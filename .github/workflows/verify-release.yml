@@ -1,0 +1,125 @@
+name: verify-release
+
+# 「干净外网机器」验收：一台全新 runner，**不 checkout 本仓、不用任何仓库密钥**，
+# 只用匿名公网下载 + 公共 Sigstore 信任根，照着 docs/VERIFYING.md 的命令逐个验签。
+#
+# 这条 job 的意义：验签说明是否真的可执行，由 CI 每天替外部用户跑一遍，而不是靠
+# README 里写一句「可以验证」。它失败 = 我们的公开验签承诺当下是假的。
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * *'   # 每天一次
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-release.yml'
+      - 'docs/VERIFYING.md'
+
+permissions:
+  contents: read
+
+env:
+  # 与 docs/VERIFYING.md 中给用户的命令逐字一致。改这里必须同步改文档。
+  OIDC_ISSUER: https://token.actions.githubusercontent.com
+
+jobs:
+  verify-as-outsider:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 安装 cosign（唯一依赖）
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        with:
+          cosign-release: 'v2.5.0'
+
+      - name: 匿名拉取最新 release 的产物清单
+        id: rel
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest"
+          # 匿名（不带 Authorization）——外部人看到的就是这个视角
+          curl -fsSL "$API" -o release.json
+          TAG="$(python3 -c 'import json;print(json.load(open("release.json"))["tag_name"])')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' > assets.txt
+          import json
+          r = json.load(open("release.json"))
+          for a in r["assets"]:
+              print(a["name"], a["browser_download_url"])
+          PY
+          echo "release: $TAG"
+          cat assets.txt
+
+      - name: 匿名下载全部产物
+        run: |
+          set -euo pipefail
+          mkdir -p dl
+          while read -r name url; do
+            curl -fsSL --retry 3 -o "dl/$name" "$url"
+          done < assets.txt
+          ls -la dl
+
+      - name: 验签（cosign verify-blob，与文档给用户的命令一致）
+        env:
+          IDENTITY_REGEXP: ^https://github\.com/${{ github.repository_owner }}/libertynet-releases/\.github/workflows/sign-release\.yml@refs/
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          checked=0
+          missing=0
+          for f in dl/*; do
+            base="$(basename "$f")"
+            case "$base" in
+              *.sig|*.pem|*.sigstore.json) continue ;;
+            esac
+            if [ ! -f "dl/${base}.sigstore.json" ]; then
+              echo "::error::产物 ${base} 没有 Sigstore bundle —— 未签名产物不得随 release 发布"
+              missing=$((missing + 1))
+              continue
+            fi
+            echo "::group::verify ${base}"
+            cosign verify-blob \
+              --bundle "dl/${base}.sigstore.json" \
+              --certificate-oidc-issuer "$OIDC_ISSUER" \
+              --certificate-identity-regexp "$IDENTITY_REGEXP" \
+              "$f"
+            echo "::endgroup::"
+            checked=$((checked + 1))
+          done
+          echo "已验签 $checked 个产物，缺签名 $missing 个"
+          [ "$missing" -eq 0 ] || exit 1
+          [ "$checked" -gt 0 ] || { echo "::error::没有任何产物被验证"; exit 1; }
+
+      - name: 负向用例 —— 篡改后必须验签失败
+        env:
+          IDENTITY_REGEXP: ^https://github\.com/${{ github.repository_owner }}/libertynet-releases/\.github/workflows/sign-release\.yml@refs/
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          target=""
+          for f in dl/*; do
+            base="$(basename "$f")"
+            case "$base" in *.sig|*.pem|*.sigstore.json) continue ;; esac
+            [ -f "dl/${base}.sigstore.json" ] && { target="$base"; break; }
+          done
+          [ -n "$target" ] || { echo "::error::找不到可用于负向测试的产物"; exit 1; }
+          cp "dl/$target" tampered
+          printf 'evil' >> tampered
+          if cosign verify-blob \
+              --bundle "dl/${target}.sigstore.json" \
+              --certificate-oidc-issuer "$OIDC_ISSUER" \
+              --certificate-identity-regexp "$IDENTITY_REGEXP" \
+              tampered 2>/dev/null; then
+            echo "::error::被篡改的文件竟然验签通过 —— 验证链是假的"
+            exit 1
+          fi
+          echo "负向用例通过：篡改后验签失败（$target）"
+
+      - name: 摘要
+        if: always()
+        run: |
+          {
+            echo "## 外部视角验签 — \`${{ steps.rel.outputs.tag }}\`"
+            echo
+            echo "匿名下载 + 公共 Sigstore 信任根，无仓库密钥、无 checkout。"
+          } >> "$GITHUB_STEP_SUMMARY"
