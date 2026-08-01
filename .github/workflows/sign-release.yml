@@ -1,0 +1,133 @@
+name: sign-release
+
+# 用 cosign keyless（Sigstore + GitHub OIDC）对 release 的每个产物签名。
+#
+# 无长期私钥：签名密钥由 cosign 在本次 job 内临时生成，用 GitHub Actions 的 OIDC
+# 身份令牌向 Sigstore Fulcio 换一张 10 分钟有效期的短命证书，签完即弃。签名与证书
+# 一并写入 Rekor 公共透明日志（可公开审计、不可事后抹除）。
+#
+# 信任根 = Sigstore 公共透明日志 + 证书里的 OIDC 身份，**不需要分发任何公钥**。
+#
+# 触发：
+#   - release published（正常发版自动签）
+#   - workflow_dispatch（手动补签历史 release，输入 tag）
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要签名的 release tag（例：v0.1.0-a5be046）'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # 回传 .sig / .pem / .sigstore.json 到 release
+  id-token: write   # 取 OIDC 令牌换 Fulcio 短命证书（keyless 的关键）
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 确定目标 tag
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          [ -n "$TAG" ] || { echo "::error::没有拿到 tag"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "目标 release: $TAG"
+
+      - name: 安装 cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        with:
+          cosign-release: 'v2.5.0'
+
+      - name: 下载 release 产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist --clobber
+          ls -la dist
+
+      - name: cosign sign-blob（keyless，逐个产物）
+        env:
+          COSIGN_YES: 'true'
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          signed=0
+          for f in dist/*; do
+            base="$(basename "$f")"
+            # 跳过签名产物本身，避免重跑时套娃
+            case "$base" in
+              *.sig|*.pem|*.sigstore.json) echo "skip $base"; continue ;;
+            esac
+            echo "::group::签名 $base"
+            cosign sign-blob \
+              --output-signature   "dist/${base}.sig" \
+              --output-certificate "dist/${base}.pem" \
+              --bundle             "dist/${base}.sigstore.json" \
+              "$f"
+            echo "::endgroup::"
+            signed=$((signed + 1))
+          done
+          [ "$signed" -gt 0 ] || { echo "::error::没有可签名的产物"; exit 1; }
+          echo "已签名 $signed 个产物"
+
+      # 签完当场自验：签名要是验不过，绝不回传上去骗人。
+      - name: 自验（cosign verify-blob）
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          IDENTITY_REGEXP: ^https://github\.com/${{ github.repository_owner }}/libertynet-releases/\.github/workflows/sign-release\.yml@refs/
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in dist/*; do
+            base="$(basename "$f")"
+            case "$base" in
+              *.sig|*.pem|*.sigstore.json) continue ;;
+            esac
+            echo "::group::验签 $base"
+            cosign verify-blob \
+              --bundle "dist/${base}.sigstore.json" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-identity-regexp "$IDENTITY_REGEXP" \
+              "$f"
+            echo "::endgroup::"
+          done
+          echo "全部产物自验通过"
+
+      - name: 回传签名到 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.sig dist/*.pem dist/*.sigstore.json)
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::没有签名文件可回传"; exit 1; }
+          gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          echo "已回传 ${#files[@]} 个签名文件"
+
+      - name: 摘要
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          {
+            echo "## cosign keyless 签名完成 — \`$TAG\`"
+            echo
+            echo "签名身份（OIDC SAN）：\`$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/sign-release.yml@$GITHUB_REF\`"
+            echo
+            echo "签发者：\`https://token.actions.githubusercontent.com\`"
+            echo
+            echo "验证方法见仓库 [docs/VERIFYING.md](../blob/main/docs/VERIFYING.md)。"
+          } >> "$GITHUB_STEP_SUMMARY"

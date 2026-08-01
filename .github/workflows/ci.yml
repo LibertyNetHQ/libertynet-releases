@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 6 * * *'   # 每天跑一次，持续盯住线上 install.sh 是否漂移
+
+permissions:
+  contents: read
+
+jobs:
+  install-sh:
+    name: install.sh — fail-closed 校验测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning install.sh tests/test-install-sh.sh
+
+      - name: 完整性校验回归测试（fail-closed）
+        run: bash tests/test-install-sh.sh
+
+  deployed-drift:
+    name: libertynet.ai/install.sh 与本仓一致（防止修复被线上旧版盖掉）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: 对比线上部署版与仓库版
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o deployed.sh https://libertynet.ai/install.sh
+          repo_sha="$(sha256sum install.sh   | awk '{print $1}')"
+          live_sha="$(sha256sum deployed.sh  | awk '{print $1}')"
+          echo "repo: $repo_sha"
+          echo "live: $live_sha"
+          if [ "$repo_sha" != "$live_sha" ]; then
+            echo "::error::线上 https://libertynet.ai/install.sh 与本仓 install.sh 不一致（漂移）"
+            diff -u install.sh deployed.sh || true
+            exit 1
+          fi
+          echo "一致 ✅"
+
+      - name: 线上版必须是 fail-closed（内容断言，独立于哈希对比）
+        run: |
+          set -euo pipefail
+          if grep -q '跳过完整性校验' deployed.sh; then
+            echo "::error::线上 install.sh 仍是 fail-open（含“跳过完整性校验”分支）"
+            exit 1
+          fi
+          grep -q '未找到 SHA256 校验文件' deployed.sh \
+            || { echo "::error::线上 install.sh 缺少 fail-closed 的校验文件缺失分支"; exit 1; }
+          echo "线上版为 fail-closed ✅"
