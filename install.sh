@@ -507,6 +507,86 @@ start_service() {
 }
 
 # =================================================================
+# 装完之后真去查一次：这台机器到底连上没有
+# =================================================================
+# 以前装完只打印一句「注册中心：<地址>」就结束——地址写得再漂亮，节点有没有
+# 真的注册上去没人知道。真机上曾经连续 3400+ 次注册失败而安装脚本一声不吭。
+# 这里不猜、不写「应该能连」：真发两个 HTTP 请求，按实际结果说话。
+#
+# 判定分三档，措辞对应真实状态：
+#   1) 注册中心不认发现协议 → 地址配错了，明确说是哪一步坏的
+#   2) 认协议，但注册表里查不到本机 DID → 明确说「没注册上」并给出排查命令
+#   3) 查得到 → 才说连上了
+verify_registration() {
+    local peers_body did found=0 i
+
+    printf '\n%b验证连接（真发请求，不是估计）：%b\n' "${C_B}" "${C_0}"
+
+    # 第 1 步：这个地址到底认不认发现协议。registry 对 GET /api/v1/peers
+    # 必须回 {"ok":true,...} 信封；回别的（404 / HTML / 连不上）都说明这个
+    # 地址上没有节点要找的那个服务。
+    peers_body="$(curl -fsS -m 15 "${REGISTRY}/api/v1/peers" 2>/dev/null || true)"
+    case "${peers_body}" in
+        *'"ok"'*'true'*)
+            info "注册中心可达，且认识发现协议：${REGISTRY}"
+            ;;
+        "")
+            err "连不上注册中心 ${REGISTRY}（GET /api/v1/peers 无响应）。"
+            err "节点已装好并在后台运行，但它现在无法向网络announce自己。"
+            err "排查：curl -v ${REGISTRY}/api/v1/peers"
+            return 1
+            ;;
+        *)
+            err "${REGISTRY} 有响应，但不是发现协议的应答——这个地址上没有节点要找的服务。"
+            err "收到：$(printf '%s' "${peers_body}" | head -c 120)"
+            err "用 LN_REGISTRY=<正确地址> 重装，或见 REGISTRY.md。"
+            return 1
+            ;;
+    esac
+
+    # 第 2 步：本机 DID 到底有没有落进注册表。守护进程刚起来，给它最多 45 秒。
+    did="$("${BIN_PATH}" --config "${CONFIG_PATH}" identity 2>/dev/null \
+        | awk '/DID:/ { print $2; exit }')"
+    if [ -z "${did}" ]; then
+        warn "读不到本机 DID，跳过注册确认（ln-node identity 无输出）。"
+        return 1
+    fi
+    printf "  本机 DID： %s\n" "${did}"
+
+    # 最多 ~30 秒。干净机器上实测 2 秒内就能查到；给到 30 秒是留给慢机器，
+    # 再长就变成让用户干等（安装脚本不该阻塞几分钟）。
+    i=0
+    while [ "${i}" -lt 10 ]; do
+        if curl -fsS -m 5 "${REGISTRY}/nodes" 2>/dev/null | grep -qF "${did}"; then
+            found=1
+            break
+        fi
+        i=$((i + 1))
+        sleep 3
+    done
+
+    if [ "${found}" = "1" ]; then
+        info "已确认：本机 DID 出现在注册表里，注册成功。"
+    else
+        err "注册未成功：30 秒内注册表 ${REGISTRY}/nodes 查不到本机 DID。"
+        err "节点在跑，但网络上看不到它。看失败原因："
+        err "  grep 'discovery registration failed' ${LOG_PATH} | tail -3"
+        return 1
+    fi
+
+    # 已知的两个缺口——如实说，别让人以为"注册成功=已经在联网干活"。
+    # 详见 REGISTRY.md。
+    if printf '%s' "${peers_body}" | tr -d ' ' | grep -q '"data":\[\]'; then
+        warn "对等发现（peer discovery）目前是空的：注册中心的 GET /api/v1/peers"
+        warn "固定返回空列表，所以本机现在发现不到任何对端。这是已知未接通项"
+        warn "（not_yet_wired），不是你这次安装的问题。"
+    fi
+    warn "重启后若本机监听地址变了，重新注册会被拒（发现注册尚未签名）。"
+    warn "两项均见 REGISTRY.md「未接通」一节。"
+    return 0
+}
+
+# =================================================================
 # 安装失败最小清理（事务式思路的最小版；绝不动身份/密钥/配置）
 # =================================================================
 # 安装未走到最后一步就退出时，清掉本次留下的半成品（损坏的二进制、我们刚建的
@@ -555,6 +635,12 @@ main() {
     printf "  配置：     %s\n" "${CONFIG_PATH}"
     printf "  身份：     %s\n" "${KEY_PATH}"
     printf "  注册中心： %s\n" "${REGISTRY}"
+
+    # 装完就查，不让"装好了"和"连上了"混为一谈。查不通不删任何东西，也不谎报成功。
+    if ! verify_registration; then
+        printf '\n%b节点已安装并在运行，但尚未接入网络（见上面的 ✗）。%b\n' "${C_Y}" "${C_0}"
+        printf '%b你的身份与配置完好，修好网络后 `ln-node stop && ln-node start` 即可重试。%b\n' "${C_Y}" "${C_0}"
+    fi
     printf "\n把 ln-node 加入 PATH（可选）：\n"
     # shellcheck disable=SC2016  # 有意保留字面 $PATH：这是打印给用户照抄的命令，不应展开
     printf '  %bexport PATH="%s:$PATH"%b\n' "${C_B}" "${BIN_DIR}" "${C_0}"
