@@ -25,7 +25,8 @@ env:
 
 jobs:
   verify-as-outsider:
-    runs-on: ubuntu-latest
+    # runs-on 走仓库变量 CI_RUNNER，不写死；删掉该变量即回到 ubuntu-latest。
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - name: 安装 cosign（唯一依赖）
         uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
