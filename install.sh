@@ -826,7 +826,7 @@ EARN_URL="${LN_EARN_URL:-https://libertynet.ai/earn.sh}"
 # 只是静默忽略）。同一次上线换四样：产物、产物 sidecar、earn.sh、earn.sh.sha256。
 # 第七次重钉（2026-11-22）：earn.sh 修了 macOS 侧的假阳性（bootstrap 失败照样打印
 # 「ok provider 在跑」，而「文件换了而进程还是旧的」在 macOS 上一直没有判据）。
-EARN_SHA256="${LN_EARN_SHA256:-b1baf9248f135cfe4fd935af98724da28374c3bc7b0d8e3142daf1027107ba05}"
+EARN_SHA256="${LN_EARN_SHA256:-bcfec1660018e083b39a4a6e69608735736ba640c238515b229979c17ce206ec}"
 
 # 有官方 provider 产物的平台。2026-11-21 起有三个：`libertynet.ai/releases/provider/`
 # 下的 `ln-coordination-node-{linux-x86_64,macos-x86_64,macos-arm64}`。
